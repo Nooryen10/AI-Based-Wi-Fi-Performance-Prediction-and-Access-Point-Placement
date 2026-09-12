@@ -1,0 +1,10 @@
+Target,Model,R2,RMSE,MAE
+signal_strength_dbm,Linear Regression,0.8587,5.5854,4.1268
+signal_strength_dbm,Random Forest,0.9758,2.3099,1.7458
+signal_strength_dbm,XGBoost,0.9784,2.1819,1.6589
+throughput_mbps,Linear Regression,0.5,28.7668,16.6576
+throughput_mbps,Random Forest,0.9605,8.0843,4.6222
+throughput_mbps,XGBoost,0.9757,6.3483,4.0274
+latency_ms,Linear Regression,0.4939,87.305,62.3736
+latency_ms,Random Forest,0.9996,2.5336,1.9713
+latency_ms,XGBoost,0.9996,2.3952,1.8897

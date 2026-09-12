@@ -1,0 +1,17 @@
+ACCESS POINT PLACEMENT OPTIMIZATION SUMMARY
+==================================================
+Floor plan: 35.0m x 25.0m, 4 rooms + corridor, 12 wall segments
+Coverage threshold: -65.0 dBm
+
+BEFORE (naive corner placement (2.0, 2.0)): 70.9% coverage
+AFTER  (optimized placement (16.0, 8.0)): 100.0% coverage
+Improvement: +29.1 percentage points
+
+2.4GHz optimal position: (16.0, 8.0) -> 100.0% coverage
+5GHz optimal position:   (18.0, 9.0) -> 93.6% coverage
+
+RESEARCH-GAP EXTENSION: MULTI-AP GREEDY JOINT PLACEMENT (5GHz)
+--------------------------------------------------
+AP 1: (18.0, 9.0) (+93.6 pts)
+AP 2: (18.0, 14.0) (+6.4 pts)
+Joint coverage: 100.0% vs single-AP 5GHz 93.6% (+6.4 points)
