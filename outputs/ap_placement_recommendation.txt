@@ -1,0 +1,12 @@
+AP PLACEMENT RECOMMENDATION REPORT
+==================================================
+Frequency Band: 2.4GHz
+Signal Threshold: -65 dBm
+Naive AP Position: (2.0, 2.0)
+Naive Coverage: 70.9%
+Recommended AP Position: (16.0, 8.0)
+Optimized Coverage: 100.0%
+Coverage Improvement: +29.1 percentage points
+
+Recommendation:
+Place the AP near (16.0, 8.0) to maximize usable Wi-Fi coverage.
