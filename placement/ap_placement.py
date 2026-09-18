@@ -66,6 +66,33 @@ WALLS = [
 ]
 
 
+class interference_db:
+    """Represent interference in dB and convert it to signal attenuation.
+
+    ``value`` may be a scalar or a NumPy array, which makes the class useful
+    for both a uniform interference floor and a spatial interference map.
+    """
+
+    def __init__(self, value=0.0, attenuation_factor=0.6):
+        self.value = np.asarray(value, dtype=float)
+        self.attenuation_factor = float(attenuation_factor)
+        if self.attenuation_factor < 0:
+            raise ValueError("attenuation_factor must be non-negative")
+
+    def attenuation(self, shape=None):
+        """Return the equivalent signal penalty in dB."""
+        penalty = self.attenuation_factor * self.value
+        return np.broadcast_to(penalty, shape) if shape is not None else penalty
+
+    def __float__(self):
+        if self.value.size != 1:
+            raise TypeError("an interference map cannot be converted to a scalar")
+        return float(self.attenuation())
+
+    def __array__(self, dtype=None):
+        return np.asarray(self.attenuation(), dtype=dtype)
+
+
 def path_loss_signal(distance, walls, band="2.4GHz", interference_db=0.0):
     """Same physics as data/generate_dataset.py -- kept identical so ML predictions
     and the geometric simulation are consistent with each other."""
@@ -128,7 +155,7 @@ def build_grid(resolution=0.5):
 
 
 def simulate_coverage(router_xy, band="2.4GHz", resolution=0.5, threshold=-65.0,
-                       interference_db=0.0):
+            interference_db=0.0):
     """Returns (X, Y, signal_grid_2d, coverage_percent) for a given router position."""
     X, Y, points = build_grid(resolution)
     dist = np.linalg.norm(points - np.asarray(router_xy), axis=1)
@@ -140,7 +167,7 @@ def simulate_coverage(router_xy, band="2.4GHz", resolution=0.5, threshold=-65.0,
 
 
 def simulate_coverage_multi(router_list, band="2.4GHz", resolution=0.5, threshold=-65.0,
-                             interference_db=0.0):
+                        interference_db=0.0):
     """
     Multi-AP version of simulate_coverage(). Each grid cell is served by whichever AP
     gives it the STRONGEST signal (best-server association -- the same assumption real
@@ -167,7 +194,7 @@ def simulate_coverage_multi(router_list, band="2.4GHz", resolution=0.5, threshol
 
 
 def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
-                                     candidate_step=1.0, threshold=-65.0):
+                                candidate_step=1.0, threshold=-65.0):
     """
     RESEARCH-GAP EXTENSION: multi-AP joint placement optimization.
 
@@ -181,11 +208,11 @@ def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
     standard, well-studied approximation for the "maximal coverage location problem":
     GREEDY SEQUENTIAL PLACEMENT with re-evaluation --
 
-      1. Place AP #1 at the position that maximizes coverage alone (exactly the Step-5 search).
-      2. Place AP #2 at the position that maximizes the MARGINAL coverage gain given AP #1 is
-         already there (i.e. considers best-server signal = max(AP1, AP2) at every cell, so it
-         naturally targets the dead zones AP #1 couldn't reach instead of overlapping it).
-      3. Repeat for AP #3, #4, ... up to num_aps.
+    1. Place AP #1 at the position that maximizes coverage alone (exactly the Step-5 search).
+    2. Place AP #2 at the position that maximizes the MARGINAL coverage gain given AP #1 is
+    already there (i.e. considers best-server signal = max(AP1, AP2) at every cell, so it
+    naturally targets the dead zones AP #1 couldn't reach instead of overlapping it).
+    3. Repeat for AP #3, #4, ... up to num_aps.
 
     This greedy strategy is a widely-used, provably-reasonable heuristic (submodular set-cover
     style guarantee: greedy achieves >= (1 - 1/e) ~= 63% of the true joint optimum for coverage
@@ -227,7 +254,7 @@ def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
             break
 
     marginal_gains = [coverage_history[0]] + [round(coverage_history[i] - coverage_history[i - 1], 1)
-                                               for i in range(1, len(coverage_history))]
+                                            for i in range(1, len(coverage_history))]
     return placed_aps, coverage_history[-1], marginal_gains
 
 
@@ -246,10 +273,10 @@ def plot_coverage_multi(router_list, band, title, save_name, threshold=-65.0):
     colors = ["black", "purple", "darkorange", "deeppink", "navy"]
     for i, pos in enumerate(router_list):
         ax.scatter(*pos, marker="*", s=550, c=colors[i % len(colors)], edgecolors="white",
-                   zorder=5, label=f"AP {i + 1} {tuple(round(v, 1) for v in pos)}")
+                zorder=5, label=f"AP {i + 1} {tuple(round(v, 1) for v in pos)}")
 
     ax.set_title(f"{title}\nJoint Coverage @ {threshold:.0f} dBm threshold: {coverage_pct:.1f}% "
-                 f"({len(router_list)} AP{'s' if len(router_list) != 1 else ''})")
+                f"({len(router_list)} AP{'s' if len(router_list) != 1 else ''})")
     ax.set_xlabel("Room Width (m)")
     ax.set_ylabel("Room Height (m)")
     ax.legend(loc="upper right", fontsize=8)
@@ -305,7 +332,7 @@ def plot_coverage(router_xy, band, title, save_name, threshold=-65.0):
     ax.contour(X, Y, signal_2d, levels=[threshold], colors="blue", linewidths=2)
     plot_floorplan(ax)
     ax.scatter(*router_xy, marker="*", s=500, c="black", edgecolors="white", zorder=5,
-               label="Router (AP)")
+            label="Router (AP)")
     ax.set_title(f"{title}\nCoverage @ {threshold:.0f} dBm threshold: {coverage_pct:.1f}%")
     ax.set_xlabel("Room Width (m)")
     ax.set_ylabel("Room Height (m)")
@@ -318,13 +345,13 @@ def plot_coverage(router_xy, band, title, save_name, threshold=-65.0):
 
 
 def plot_optimization_surface(candidates_x, candidates_y, coverage_map, best_pos, band,
-                               save_name):
+                            save_name):
     fig, ax = plt.subplots(figsize=(9, 7))
     hm = ax.pcolormesh(candidates_x, candidates_y, coverage_map, cmap="viridis", shading="auto")
     plt.colorbar(hm, ax=ax, label="Achievable Coverage (%)")
     plot_floorplan(ax)
     ax.scatter(*best_pos, marker="*", s=500, c="red", edgecolors="white", zorder=5,
-               label=f"Optimal AP position {tuple(round(v,1) for v in best_pos)}")
+            label=f"Optimal AP position {tuple(round(v,1) for v in best_pos)}")
     ax.set_title(f"AP Placement Search Surface ({band})\n"
                   f"Color = coverage% achievable if router placed at that point")
     ax.set_xlabel("Room Width (m)")
@@ -335,6 +362,132 @@ def plot_optimization_surface(candidates_x, candidates_y, coverage_map, best_pos
     plt.savefig(f"{OUT_DIR}/{save_name}", dpi=150)
     plt.close()
 
+def plot_before_after_comparison(naive_pos, naive_cov, best_pos, best_cov,
+                                   band="2.4GHz", threshold=-65.0,
+                                   save_name="11_before_after_comparison.png"):
+    """Create a side-by-side BEFORE vs AFTER coverage visualization."""
+
+    X1, Y1, signal_before, _ = simulate_coverage(
+        naive_pos, band=band, threshold=threshold
+    )
+    X2, Y2, signal_after, _ = simulate_coverage(
+        best_pos, band=band, threshold=threshold
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    hm1 = axes[0].pcolormesh(
+        X1, Y1, signal_before, cmap="RdYlGn",
+        vmin=-90, vmax=-30, shading="auto"
+    )
+    axes[0].contour(
+        X1, Y1, signal_before, levels=[threshold],
+        colors="blue", linewidths=2
+    )
+    plot_floorplan(axes[0])
+    axes[0].scatter(
+        *naive_pos, marker="*", s=500, c="black",
+        edgecolors="white", zorder=5
+    )
+    axes[0].set_title(
+        f"BEFORE: Naive Placement\n"
+        f"AP: {naive_pos} | Coverage: {naive_cov:.1f}%"
+    )
+    axes[0].set_xlabel("Room Width (m)")
+    axes[0].set_ylabel("Room Height (m)")
+    axes[0].set_aspect("equal")
+
+    hm2 = axes[1].pcolormesh(
+        X2, Y2, signal_after, cmap="RdYlGn",
+        vmin=-90, vmax=-30, shading="auto"
+    )
+    axes[1].contour(
+        X2, Y2, signal_after, levels=[threshold],
+        colors="blue", linewidths=2
+    )
+    plot_floorplan(axes[1])
+    axes[1].scatter(
+        *best_pos, marker="*", s=500, c="black",
+        edgecolors="white", zorder=5
+    )
+    axes[1].set_title(
+        f"AFTER: Optimized Placement\n"
+        f"AP: {best_pos} | Coverage: {best_cov:.1f}%"
+    )
+    axes[1].set_xlabel("Room Width (m)")
+    axes[1].set_ylabel("Room Height (m)")
+    axes[1].set_aspect("equal")
+
+    fig.colorbar(
+        hm2, ax=axes, label="Signal Strength (dBm)", shrink=0.85
+    )
+
+    improvement = best_cov - naive_cov
+    fig.suptitle(
+        f"AP Placement Before vs After ({band})\n"
+        f"Coverage Improvement: +{improvement:.1f} percentage points "
+        f"at {threshold:.0f} dBm threshold",
+        fontsize=14
+    )
+
+    plt.tight_layout()
+    plt.savefig(f"{OUT_DIR}/{save_name}", dpi=150)
+    plt.close()
+    return save_name
+
+
+def generate_placement_report(naive_pos, naive_cov, best_pos, best_cov,
+                            band="2.4GHz", threshold=-65.0):
+    """
+    Generate a clear before-vs-after AP placement report.
+    """
+
+    improvement = best_cov - naive_cov
+
+    print("\n" + "=" * 70)
+    print("AP PLACEMENT RECOMMENDATION REPORT")
+    print("=" * 70)
+
+    print(f"Frequency Band       : {band}")
+    print(f"Signal Threshold     : {threshold:.0f} dBm")
+    print(f"Naive AP Position    : {naive_pos}")
+    print(f"Naive Coverage       : {naive_cov:.1f}%")
+    print(f"Recommended Position : {best_pos}")
+    print(f"Optimized Coverage   : {best_cov:.1f}%")
+    print(f"Coverage Improvement : +{improvement:.1f} percentage points")
+
+    print("-" * 70)
+
+    if improvement > 0:
+        print(
+            f"RECOMMENDATION: Place the AP near {best_pos} "
+            f"to maximize usable Wi-Fi coverage."
+        )
+    else:
+        print("RECOMMENDATION: Current AP placement is already optimal.")
+
+    print("=" * 70)
+
+    # Save the report as a text file
+    report_path = OUT_DIR / "ap_placement_recommendation.txt"
+
+    with open(report_path, "w") as f:
+        f.write("AP PLACEMENT RECOMMENDATION REPORT\n")
+        f.write("=" * 50 + "\n")
+        f.write(f"Frequency Band: {band}\n")
+        f.write(f"Signal Threshold: {threshold:.0f} dBm\n")
+        f.write(f"Naive AP Position: {naive_pos}\n")
+        f.write(f"Naive Coverage: {naive_cov:.1f}%\n")
+        f.write(f"Recommended AP Position: {best_pos}\n")
+        f.write(f"Optimized Coverage: {best_cov:.1f}%\n")
+        f.write(f"Coverage Improvement: +{improvement:.1f} percentage points\n")
+        f.write("\nRecommendation:\n")
+        f.write(
+            f"Place the AP near {best_pos} to maximize "
+            f"usable Wi-Fi coverage.\n"
+        )
+
+    print(f"Saved: {report_path.name}")
 
 if __name__ == "__main__":
     THRESHOLD = -65.0
@@ -343,45 +496,56 @@ if __name__ == "__main__":
     print("STEP 5: ACCESS POINT PLACEMENT OPTIMIZATION")
     print("=" * 70)
 
-    # ---- "Before": naive corner placement (a common real-world mistake --
-    #      people tend to place the router wherever the ISP cable enters the flat,
-    #      which is very often a corner room, not the centre of the home) ----
     naive_pos = (2.0, 2.0)
-    naive_cov = plot_coverage(naive_pos, "2.4GHz",
-                               f"BEFORE: Naive Corner Placement — Router at {naive_pos}",
-                               "05_before_naive_placement.png", threshold=THRESHOLD)
+    naive_cov = plot_coverage(
+        naive_pos, "2.4GHz",
+        f"BEFORE: Naive Corner Placement — Router at {naive_pos}",
+        "05_before_naive_placement.png", threshold=THRESHOLD)
     print(f"\n[BEFORE] Naive corner placement {naive_pos}: {naive_cov:.1f}% coverage (2.4GHz)")
 
-    # ---- "After": optimized placement via exhaustive grid search ----
-    best_pos, best_cov, (cx, cy, cov_map) = find_optimal_placement(band="2.4GHz",
-                                                                     candidate_step=1.0,
-                                                                     threshold=THRESHOLD)
+    best_pos, best_cov, (cx, cy, cov_map) = find_optimal_placement(
+        band="2.4GHz", candidate_step=1.0, threshold=THRESHOLD)
     best_pos = (float(best_pos[0]), float(best_pos[1]))
-    plot_coverage(best_pos, "2.4GHz",
-                  f"AFTER: Optimized Placement — Router at {tuple(round(v,2) for v in best_pos)}",
-                  "06_after_optimized_placement.png", threshold=THRESHOLD)
-    print(f"[AFTER]  Optimized placement {tuple(round(v,2) for v in best_pos)}: "
-          f"{best_cov:.1f}% coverage (2.4GHz)")
+    plot_coverage(
+        best_pos, "2.4GHz",
+        f"AFTER: Optimized Placement — Router at {tuple(round(v, 2) for v in best_pos)}",
+        "06_after_optimized_placement.png", threshold=THRESHOLD)
+    print(f"[AFTER]  Optimized placement {tuple(round(v,2) for v in best_pos)}: {best_cov:.1f}% coverage (2.4GHz)")
     print(f"[IMPROVEMENT] +{best_cov - naive_cov:.1f} percentage points of coverage")
 
-    plot_optimization_surface(cx, cy, cov_map, best_pos, "2.4GHz",
-                               "07_placement_search_surface.png")
+    generate_placement_report(
+        naive_pos, naive_cov, best_pos, best_cov,
+        band="2.4GHz", threshold=THRESHOLD)
+
+    # ---- NEW: side-by-side BEFORE vs AFTER visualization ----
+    comparison_file = plot_before_after_comparison(
+        naive_pos,
+        naive_cov,
+        best_pos,
+        best_cov,
+        band="2.4GHz",
+        threshold=THRESHOLD
+    )
+    print(f"Saved: {comparison_file} (before vs after coverage comparison)")
+
+    plot_optimization_surface(
+        cx, cy, cov_map, best_pos, "2.4GHz",
+        "07_placement_search_surface.png")
     print("Saved: 07_placement_search_surface.png (coverage achievable from every candidate AP spot)")
 
-    # ---- Bonus: 2.4GHz vs 5GHz comparison at the SAME optimal position ----
-    best_pos_5g, best_cov_5g, _ = find_optimal_placement(band="5GHz", candidate_step=1.0,
-                                                           threshold=THRESHOLD)
+    best_pos_5g, best_cov_5g, _ = find_optimal_placement(
+        band="5GHz", candidate_step=1.0, threshold=THRESHOLD)
     best_pos_5g = (float(best_pos_5g[0]), float(best_pos_5g[1]))
-    plot_coverage(best_pos_5g, "5GHz",
-                  f"AFTER: Optimized Placement — Router at {tuple(round(v,2) for v in best_pos_5g)}",
-                  "08_optimized_placement_5ghz.png", threshold=THRESHOLD)
-    print(f"\n[BAND COMPARISON] Best achievable coverage:")
+    plot_coverage(
+        best_pos_5g, "5GHz",
+        f"AFTER: Optimized Placement — Router at {tuple(round(v,2) for v in best_pos_5g)}",
+        "08_optimized_placement_5ghz.png", threshold=THRESHOLD)
+    print("\n[BAND COMPARISON] Best achievable coverage:")
     print(f"   2.4GHz -> {best_cov:.1f}% at optimal position {tuple(round(v,2) for v in best_pos)}")
     print(f"   5GHz   -> {best_cov_5g:.1f}% at optimal position {tuple(round(v,2) for v in best_pos_5g)}")
-    print(f"   (5GHz has shorter range/more wall loss -> typically needs the AP more centrally")
-    print(f"    located, or multiple APs, to match 2.4GHz's coverage footprint)")
+    print("   (5GHz has shorter range/more wall loss -> typically needs the AP more centrally")
+    print("    located, or multiple APs, to match 2.4GHz's coverage footprint)")
 
-    # Save numeric summary
     with open(f"{OUT_DIR}/placement_summary.txt", "w") as f:
         f.write("ACCESS POINT PLACEMENT OPTIMIZATION SUMMARY\n")
         f.write("=" * 50 + "\n")
@@ -394,28 +558,22 @@ if __name__ == "__main__":
         f.write(f"5GHz optimal position:   {tuple(round(v,2) for v in best_pos_5g)} -> {best_cov_5g:.1f}% coverage\n")
     print("\nSaved: placement_summary.txt")
 
-    # ---- RESEARCH-GAP EXTENSION: multi-AP joint placement (5GHz never reached 100% with
-    #      a single AP above -- this is exactly the scenario multi-AP placement is for) ----
     print("\n" + "=" * 70)
     print("RESEARCH-GAP EXTENSION: MULTI-AP GREEDY JOINT PLACEMENT (5GHz)")
     print("=" * 70)
     multi_positions, multi_cov, marginal_gains = find_optimal_multi_ap_placement(
         num_aps=2, band="5GHz", candidate_step=1.0, threshold=THRESHOLD)
-    plot_coverage_multi(multi_positions, "5GHz",
-                         f"Multi-AP Greedy Placement (5GHz, {len(multi_positions)} APs)",
-                         "10_multi_ap_placement_5ghz.png", threshold=THRESHOLD)
+    plot_coverage_multi(
+        multi_positions, "5GHz",
+        f"Multi-AP Greedy Placement (5GHz, {len(multi_positions)} APs)",
+        "10_multi_ap_placement_5ghz.png", threshold=THRESHOLD)
     for i, (pos, gain) in enumerate(zip(multi_positions, marginal_gains)):
-        print(f"  AP {i + 1} -> position {tuple(round(v, 2) for v in pos)}  "
-              f"(+{gain:.1f} pts marginal coverage gain)")
-    print(f"  Joint coverage with {len(multi_positions)} APs: {multi_cov:.1f}%  "
-          f"(vs {best_cov_5g:.1f}% with a single 5GHz AP -> "
-          f"+{multi_cov - best_cov_5g:.1f} points)")
+        print(f"  AP {i + 1} -> position {tuple(round(v, 2) for v in pos)}  (+{gain:.1f} pts marginal coverage gain)")
+    print(f"  Joint coverage with {len(multi_positions)} APs: {multi_cov:.1f}%  (vs {best_cov_5g:.1f}% with a single 5GHz AP -> +{multi_cov - best_cov_5g:.1f} points)")
     print("Saved: 10_multi_ap_placement_5ghz.png")
-
     with open(f"{OUT_DIR}/placement_summary.txt", "a") as f:
         f.write("\nRESEARCH-GAP EXTENSION: MULTI-AP GREEDY JOINT PLACEMENT (5GHz)\n")
         f.write("-" * 50 + "\n")
         for i, (pos, gain) in enumerate(zip(multi_positions, marginal_gains)):
             f.write(f"AP {i + 1}: {tuple(round(v, 2) for v in pos)} (+{gain:.1f} pts)\n")
-        f.write(f"Joint coverage: {multi_cov:.1f}% vs single-AP 5GHz {best_cov_5g:.1f}% "
-                f"(+{multi_cov - best_cov_5g:.1f} points)\n")
+        f.write(f"Joint coverage: {multi_cov:.1f}% vs single-AP 5GHz {best_cov_5g:.1f}% (+{multi_cov - best_cov_5g:.1f} points)\n")

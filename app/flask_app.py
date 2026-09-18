@@ -78,7 +78,7 @@ def render_coverage_figure(router_positions, band, room_w, room_h, threshold=THR
         axis.plot([x1, x2], [y1, y2], color="black", linewidth=2.6, solid_capstyle="round")
     for i, pos in enumerate(router_positions):
         axis.scatter(*pos, marker="*", s=420, c=AP_COLORS[i % len(AP_COLORS)],
-                     edgecolors="white", linewidths=1.2, zorder=5, label=f"AP {i + 1}")
+                    edgecolors="white", linewidths=1.2, zorder=5, label=f"AP {i + 1}")
     axis.set_xlabel("Room Width (m)")
     axis.set_ylabel("Room Height (m)")
     axis.set_aspect("equal")
@@ -127,7 +127,7 @@ def validate_form(form):
         errors.append("Room width and height must both be greater than 0.")
     if form["room_w"] > 200 or form["room_h"] > 200:
         errors.append("Room dimensions above 200 m aren't realistic for a single floor plan -- "
-                       "please enter a smaller value.")
+                      "please enter a smaller value.")
     if form["walls"] < 0:
         errors.append("Number of walls can't be negative.")
     if form["walls"] > 20:
@@ -459,7 +459,7 @@ PAGE = """
   {% endif %}
 </div>
 
-<footer>AI-Based Wi-Fi Performance Prediction &amp; AP Placement — CN academic project by Nooryen</footer>
+<footer>AI-Based Wi-Fi Performance Prediction &amp; AP Placement — CN academic project by Nooryen, Tanvi & Vedanti</footer>
 
 <script>
   document.getElementById('predict-form').addEventListener('submit', function () {
