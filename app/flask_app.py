@@ -53,12 +53,14 @@ AP_COLORS = ["#111827", "#7c3aed", "#ea580c", "#db2777", "#0891b2"]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def render_coverage_figure(router_positions, band, room_w, room_h, threshold=THRESHOLD):
+def render_coverage_figure(router_positions, band, room_w, room_h, threshold=THRESHOLD,
+                            interference_aware=False, sinr_threshold_db=9.0):
     """Renders the coverage heatmap for one or more AP positions on the user's own
     (rescaled) floor plan and returns it as a base64 PNG data-URI string, plus the
     resulting coverage percentage. Kept in-memory -- nothing is written to disk here."""
     _apply_scaled_floorplan(room_w, room_h)
 
+    sinr_2d = None
     if len(router_positions) == 1:
         X, Y, points = ap.build_grid(0.5)
         dist = np.linalg.norm(points - np.asarray(router_positions[0]), axis=1)
@@ -67,13 +69,17 @@ def render_coverage_figure(router_positions, band, room_w, room_h, threshold=THR
         signal_2d = signal.reshape(X.shape)
         coverage_pct = 100.0 * np.mean(signal >= threshold)
     else:
-        X, Y, signal_2d, _, coverage_pct = ap.simulate_coverage_multi(
-            router_positions, band=band, threshold=threshold)
+        X, Y, signal_2d, _, coverage_pct, sinr_2d = ap.simulate_coverage_multi(
+            router_positions, band=band, threshold=threshold,
+            interference_aware=interference_aware, sinr_threshold_db=sinr_threshold_db)
 
     fig, axis = plt.subplots(figsize=(7.5, 5.6))
     hm = axis.pcolormesh(X, Y, signal_2d, cmap="RdYlGn", vmin=-90, vmax=-30, shading="auto")
     plt.colorbar(hm, ax=axis, label="Signal Strength (dBm)")
     axis.contour(X, Y, signal_2d, levels=[threshold], colors="#1d4ed8", linewidths=1.8)
+    if interference_aware and sinr_2d is not None:
+        axis.contour(X, Y, sinr_2d, levels=[sinr_threshold_db], colors="#dc2626",
+                     linewidths=1.6, linestyles="dashed")
     for (x1, y1), (x2, y2) in ap.WALLS:
         axis.plot([x1, x2], [y1, y2], color="black", linewidth=2.6, solid_capstyle="round")
     for i, pos in enumerate(router_positions):
@@ -83,7 +89,8 @@ def render_coverage_figure(router_positions, band, room_w, room_h, threshold=THR
     axis.set_ylabel("Room Height (m)")
     axis.set_aspect("equal")
     axis.legend(loc="upper right", fontsize=8, framealpha=0.9)
-    axis.set_title(f"Coverage @ {threshold:.0f} dBm threshold  —  {coverage_pct:.1f}%", fontsize=11)
+    mode_note = " (SINR-checked)" if interference_aware else ""
+    axis.set_title(f"Coverage{mode_note} @ {threshold:.0f} dBm threshold  —  {coverage_pct:.1f}%", fontsize=11)
     fig.tight_layout()
 
     buf = io.BytesIO()
@@ -138,6 +145,8 @@ def validate_form(form):
         errors.append("Please enter 500 or fewer concurrent users.")
     if form["num_aps"] < 1 or form["num_aps"] > 4:
         errors.append("Number of access points must be between 1 and 4.")
+    if form["sinr_threshold_db"] < 0 or form["sinr_threshold_db"] > 30:
+        errors.append("Minimum SINR must be between 0 and 30 dB.")
     return errors
 
 
@@ -392,6 +401,17 @@ PAGE = """
         </select>
         <div class="hint">Choosing 2+ switches on the multi-AP greedy joint-placement optimizer (research-gap extension) instead of the single-router search.</div>
 
+        <label style="display:flex;align-items:center;gap:8px;margin-top:16px;">
+          <input type="checkbox" name="interference_aware" value="1" style="width:auto;"
+                 {{ 'checked' if form.interference_aware }}>
+          Account for AP-to-AP interference (advanced)
+        </label>
+        <div class="hint">2nd research-gap extension: also penalizes placing multiple APs close enough to co-channel-interfere with each other, instead of only chasing raw coverage. Only applies with 2+ APs. A stricter (higher) SINR requirement below may lead to FEWER APs being recommended than you asked for — that's intentional, it means extra APs wouldn't actually help once real interference is accounted for.</div>
+
+        <label>Minimum acceptable SINR (dB)</label>
+        <input type="number" step="0.5" min="0" max="30" name="sinr_threshold_db" value="{{ form.sinr_threshold_db }}">
+        <div class="hint">Only used when the checkbox above is on. Lower = more tolerant of interference (APs can sit closer together); higher = stricter, may spread APs further apart or recommend fewer of them.</div>
+
         <button class="submit" type="submit" id="submit-btn">Predict &amp; Recommend Placement</button>
       </form>
     </div>
@@ -444,6 +464,16 @@ PAGE = """
       {% endfor %}
     </ul>
 
+    {% if result.num_aps_placed < result.num_aps %}
+    <div class="gap-callout" style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">
+      <b>Note:</b> you asked for {{ result.num_aps }} APs, but the search stopped after
+      {{ result.num_aps_placed }} because coverage already reached {{ result.coverage }}% —
+      adding more APs wouldn't gain any additional area (and, if interference-awareness is on,
+      could actually make real-world coverage worse by adding unnecessary interference).
+      This is intentional early-stopping, not an error.
+    </div>
+    {% endif %}
+
     {% if result.num_aps > 1 %}
     <div class="gap-callout">
       <b>Multi-AP mode (research-gap extension):</b> a single AP is often insufficient once a floor
@@ -451,6 +481,14 @@ PAGE = """
       Instead of one router, {{ result.num_aps }} access points were jointly placed with a
       greedy coverage-maximization search so each additional AP targets the biggest remaining
       dead zone left by the previous ones.
+    </div>
+    {% endif %}
+    {% if result.interference_aware %}
+    <div class="gap-callout" style="background:#fff7ed;border-color:#fed7aa;color:#9a3412;">
+      <b>Interference-aware mode (2nd research-gap extension):</b> APs were also kept far enough
+      apart to avoid co-channel interference (assuming, conservatively, that they'd share one
+      Wi-Fi channel) — not just placed for raw coverage. The red dashed line on the map below
+      marks where the signal-to-interference ratio drops below a usable level.
     </div>
     {% endif %}
 
@@ -476,7 +514,8 @@ PAGE = """
 @app.route("/", methods=["GET", "POST"])
 def index():
     form = {"room_w": 30, "room_h": 20, "walls": 2, "users": 15,
-            "interference": "medium", "band": "2.4GHz", "num_aps": 1}
+            "interference": "medium", "band": "2.4GHz", "num_aps": 1, "interference_aware": False,
+            "sinr_threshold_db": 3.0}
     result = None
     errors = []
 
@@ -489,6 +528,8 @@ def index():
             form["interference"] = request.form["interference"]
             form["band"] = request.form["band"]
             form["num_aps"] = int(request.form["num_aps"])
+            form["interference_aware"] = "interference_aware" in request.form
+            form["sinr_threshold_db"] = float(request.form.get("sinr_threshold_db", 3.0))
         except (ValueError, KeyError):
             errors = ["Please make sure every field is filled in with a valid number."]
 
@@ -501,15 +542,19 @@ def index():
                                          form["interference"], form["band"], ARTIFACTS, MODELS)
             interpretation = interpret_results(preds)
 
+            interference_aware = form["interference_aware"] and form["num_aps"] > 1
             if form["num_aps"] == 1:
                 pos, coverage = recommend_placement(form["room_w"], form["room_h"], band=form["band"])
                 positions, gains = [pos], None
             else:
                 positions, coverage, gains = recommend_multi_ap_placement(
-                    form["room_w"], form["room_h"], num_aps=form["num_aps"], band=form["band"])
+                    form["room_w"], form["room_h"], num_aps=form["num_aps"], band=form["band"],
+                    interference_aware=interference_aware, sinr_threshold_db=form["sinr_threshold_db"])
 
             coverage_img, _ = render_coverage_figure(positions, form["band"],
-                                                       form["room_w"], form["room_h"])
+                                                       form["room_w"], form["room_h"],
+                                                       interference_aware=interference_aware,
+                                                       sinr_threshold_db=form["sinr_threshold_db"])
 
             sig_label, sig_color = signal_badge(preds["signal_strength_dbm"])
             thr_label, thr_color = throughput_badge(preds["throughput_mbps"])
@@ -523,6 +568,8 @@ def index():
                 "coverage": coverage,
                 "coverage_img": coverage_img,
                 "num_aps": form["num_aps"],
+                "num_aps_placed": len(positions),
+                "interference_aware": interference_aware,
                 "ap_colors": AP_COLORS,
                 "sig_label": sig_label, "sig_color": sig_color,
                 "thr_label": thr_label, "thr_color": thr_color,

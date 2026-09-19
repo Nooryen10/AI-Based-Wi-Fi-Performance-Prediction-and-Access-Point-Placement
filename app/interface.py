@@ -82,15 +82,22 @@ def recommend_placement(room_w, room_h, band="2.4GHz", threshold=-65.0):
     return (round(float(best_pos[0]), 2), round(float(best_pos[1]), 2)), round(best_cov, 1)
 
 
-def recommend_multi_ap_placement(room_w, room_h, num_aps=2, band="2.4GHz", threshold=-65.0):
+def recommend_multi_ap_placement(room_w, room_h, num_aps=2, band="2.4GHz", threshold=-65.0,
+                                  interference_aware=False, sinr_threshold_db=9.0):
     """
     RESEARCH-GAP EXTENSION: multi-AP placement recommendation.
     Greedily places `num_aps` access points to jointly maximize coverage -- see the detailed
     rationale in placement/ap_placement.py::find_optimal_multi_ap_placement.
+
+    interference_aware=True switches on the SECOND research-gap extension: it additionally
+    penalizes placing APs so close together that they would co-channel-interfere with each
+    other in a real deployment (see find_optimal_multi_ap_placement's docstring). With this
+    on, the search may recommend fewer or more spread-out APs than the coverage-only mode.
     """
     _apply_scaled_floorplan(room_w, room_h)
     positions, final_cov, marginal_gains = find_optimal_multi_ap_placement(
-        num_aps=num_aps, band=band, candidate_step=max(1.0, room_w / 25), threshold=threshold)
+        num_aps=num_aps, band=band, candidate_step=max(1.0, room_w / 25), threshold=threshold,
+        interference_aware=interference_aware, sinr_threshold_db=sinr_threshold_db)
     positions = [(round(p[0], 2), round(p[1], 2)) for p in positions]
     return positions, round(final_cov, 1), marginal_gains
 
@@ -140,10 +147,20 @@ def main():
                          help="Number of access points to jointly place (research-gap extension; "
                               "default 1 = original single-AP behaviour, use 2+ for multi-AP "
                               "greedy coverage optimization)")
+    parser.add_argument("--interference_aware", action="store_true",
+                         help="SECOND research-gap extension: when placing 2+ APs, also penalize "
+                              "placing them close enough to co-channel-interfere with each other "
+                              "(see placement/ap_placement.py::find_optimal_multi_ap_placement). "
+                              "No effect with --num_aps 1.")
+    parser.add_argument("--sinr_threshold_db", type=float, default=9.0,
+                         help="Minimum acceptable signal-to-interference ratio in dB when "
+                              "--interference_aware is set (default 9.0)")
     args = parser.parse_args()
 
-    # Interactive fallback for any missing arguments
-    def ask(prompt, cast=float, choices=None):
+    # Interactive fallback for any missing arguments -- with range validation, so both
+    # --flag misuse (e.g. --room_w -5) AND interactive typos are rejected consistently
+    # with the same rules the web UI (app/flask_app.py::validate_form) enforces.
+    def ask(prompt, cast=float, choices=None, min_val=None, max_val=None):
         while True:
             val = input(prompt).strip()
             try:
@@ -151,18 +168,47 @@ def main():
                 if choices and v not in choices:
                     print(f"  Please choose one of {choices}")
                     continue
+                if min_val is not None and v < min_val:
+                    print(f"  Please enter a value >= {min_val}")
+                    continue
+                if max_val is not None and v > max_val:
+                    print(f"  Please enter a value <= {max_val}")
+                    continue
                 return v
             except ValueError:
                 print("  Invalid input, try again.")
 
-    room_w = args.room_w or ask("Room width (m): ", float)
-    room_h = args.room_h or ask("Room height (m): ", float)
-    walls = args.walls if args.walls is not None else ask("Number of walls to device: ", int)
-    users = args.users if args.users is not None else ask("Number of concurrent users: ", int)
-    interference = args.interference or ask("Interference (low/medium/high): ", str,
-                                              choices=["low", "medium", "high"])
-    band = args.band or ask("Frequency band (2.4GHz/5GHz): ", str, choices=["2.4GHz", "5GHz"])
-    distance = args.distance or (np.hypot(room_w, room_h) / 2)
+    def require(value, prompt, cast=float, choices=None, min_val=None, max_val=None):
+        """Returns `value` if it was actually supplied AND passes validation; otherwise
+        prompts interactively. Uses `is not None` (not truthy) checks throughout so an
+        explicitly-passed 0 (e.g. --walls 0) is never mistaken for "not supplied"."""
+        if value is not None:
+            ok = True
+            if choices and value not in choices:
+                print(f"Invalid --{prompt.split()[0].lower()}: must be one of {choices}. "
+                      f"Falling back to interactive input.")
+                ok = False
+            if min_val is not None and value < min_val:
+                print(f"Invalid value {value}: must be >= {min_val}. Falling back to interactive input.")
+                ok = False
+            if max_val is not None and value > max_val:
+                print(f"Invalid value {value}: must be <= {max_val}. Falling back to interactive input.")
+                ok = False
+            if ok:
+                return value
+        return ask(prompt, cast, choices=choices, min_val=min_val, max_val=max_val)
+
+    room_w = require(args.room_w, "Room width (m): ", float, min_val=0.1, max_val=200)
+    room_h = require(args.room_h, "Room height (m): ", float, min_val=0.1, max_val=200)
+    walls = require(args.walls, "Number of walls to device: ", int, min_val=0, max_val=20)
+    users = require(args.users, "Number of concurrent users: ", int, min_val=1, max_val=500)
+    interference = require(args.interference, "Interference (low/medium/high): ", str,
+                            choices=["low", "medium", "high"])
+    band = require(args.band, "Frequency band (2.4GHz/5GHz): ", str, choices=["2.4GHz", "5GHz"])
+    distance = args.distance if args.distance is not None else (np.hypot(room_w, room_h) / 2)
+    if args.num_aps < 1 or args.num_aps > 4:
+        print(f"--num_aps must be between 1 and 4 (got {args.num_aps}); using 1 instead.")
+        args.num_aps = 1
 
     print("\nLoading trained models...")
     artifacts, models = load_artifacts()
@@ -190,10 +236,12 @@ def main():
         print(f"Recommended position: x={best_pos[0]}m, y={best_pos[1]}m (measured from bottom-left corner)")
         print(f"Expected coverage at -65 dBm threshold: {best_cov}%")
     else:
+        mode_note = " with interference-awareness (2nd research-gap extension)" if args.interference_aware else ""
         print(f"Computing optimal {num_aps}-AP joint placement for a {room_w}m x {room_h}m room "
-              f"(research-gap extension: greedy multi-AP coverage optimization)...")
-        positions, final_cov, gains = recommend_multi_ap_placement(room_w, room_h, num_aps=num_aps,
-                                                                     band=band)
+              f"(research-gap extension: greedy multi-AP coverage optimization{mode_note})...")
+        positions, final_cov, gains = recommend_multi_ap_placement(
+            room_w, room_h, num_aps=num_aps, band=band,
+            interference_aware=args.interference_aware, sinr_threshold_db=args.sinr_threshold_db)
         for i, (pos, gain) in enumerate(zip(positions, gains)):
             print(f"  AP {i + 1}: x={pos[0]}m, y={pos[1]}m  (+{gain}% marginal coverage gain)")
         if len(positions) < num_aps:
