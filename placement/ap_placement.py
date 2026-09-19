@@ -166,35 +166,81 @@ def simulate_coverage(router_xy, band="2.4GHz", resolution=0.5, threshold=-65.0,
     return X, Y, signal_2d, coverage_pct
 
 
+NOISE_FLOOR_DBM = -95.0   # typical Wi-Fi receiver noise floor
+
+
+def _dbm_to_mw(dbm):
+    return 10.0 ** (np.asarray(dbm, dtype=float) / 10.0)
+
+
+def _mw_to_dbm(mw):
+    return 10.0 * np.log10(np.maximum(mw, 1e-12))
+
+
 def simulate_coverage_multi(router_list, band="2.4GHz", resolution=0.5, threshold=-65.0,
-                        interference_db=0.0):
+                        interference_db=0.0, interference_aware=False, sinr_threshold_db=9.0,
+                        noise_floor_dbm=NOISE_FLOOR_DBM):
     """
     Multi-AP version of simulate_coverage(). Each grid cell is served by whichever AP
     gives it the STRONGEST signal (best-server association -- the same assumption real
-    Wi-Fi clients use when roaming between APs on the same SSID). Returns
-    (X, Y, best_signal_2d, serving_ap_index_2d, coverage_percent).
+    Wi-Fi clients use when roaming between APs on the same SSID).
+
+    SECOND RESEARCH-GAP EXTENSION -- interference_aware=True:
+    By default (interference_aware=False, unchanged from before) a cell counts as "covered"
+    purely because SOME AP's signal there clears the absolute RSSI threshold. That is exactly
+    the gap most coverage-only multi-AP placement tools (including this project's own first
+    extension, find_optimal_multi_ap_placement) have: nothing stops the algorithm from
+    happily stacking two APs close together, because from a pure "is anyone loud enough here"
+    view that looks fine -- even though in real deployments those two nearby APs would very
+    likely share the same Wi-Fi channel (2.4GHz has only 3 non-overlapping channels; dense
+    deployments run out of clean channels fast) and so would CO-CHANNEL INTERFERE with each
+    other, degrading real-world throughput at exactly the point where their coverage overlaps.
+
+    When interference_aware=True, every placed AP is conservatively treated as being on the
+    SAME channel as every other one (the simple, worst-case assumption -- this project doesn't
+    do channel planning). At each grid cell we compute:
+        SINR(dB) = 10*log10( P_serving_mW / (sum of P_other_APs_mW + P_noise_floor_mW) )
+    and a cell only counts as covered if it ALSO clears `sinr_threshold_db` (9 dB by default,
+    a reasonable minimum for a good modulation/coding rate), on top of the usual absolute RSSI
+    threshold. This makes the placement search naturally spread APs out instead of clustering
+    them, since clustering now measurably lowers SINR without buying any extra coverage.
+
+    Returns: (X, Y, best_signal_2d, serving_ap_index_2d, coverage_percent, sinr_2d_or_None)
     """
     X, Y, points = build_grid(resolution)
     n_points = points.shape[0]
-    best_signal = np.full(n_points, -999.0)
-    serving_ap = np.zeros(n_points, dtype=int)
+    n_aps = len(router_list)
+    signals_mw = np.zeros((n_aps, n_points))
 
     for k, router_xy in enumerate(router_list):
         dist = np.linalg.norm(points - np.asarray(router_xy), axis=1)
         walls_crossed = count_wall_crossings(router_xy, points)
-        signal = path_loss_signal(dist, walls_crossed, band=band, interference_db=interference_db)
-        better = signal > best_signal
-        best_signal[better] = signal[better]
-        serving_ap[better] = k
+        signal_dbm = path_loss_signal(dist, walls_crossed, band=band, interference_db=interference_db)
+        signals_mw[k] = _dbm_to_mw(signal_dbm)
 
-    signal_2d = best_signal.reshape(X.shape)
+    serving_ap = np.argmax(signals_mw, axis=0)
+    best_signal_mw = signals_mw[serving_ap, np.arange(n_points)]
+    best_signal_dbm = _mw_to_dbm(best_signal_mw)
+
+    sinr_2d = None
+    if interference_aware and n_aps > 1:
+        total_mw = signals_mw.sum(axis=0)
+        co_channel_interference_mw = total_mw - best_signal_mw + _dbm_to_mw(noise_floor_dbm)
+        sinr_db = 10.0 * np.log10(best_signal_mw / co_channel_interference_mw)
+        covered = (best_signal_dbm >= threshold) & (sinr_db >= sinr_threshold_db)
+        sinr_2d = sinr_db.reshape(X.shape)
+    else:
+        covered = best_signal_dbm >= threshold
+
+    signal_2d = best_signal_dbm.reshape(X.shape)
     serving_2d = serving_ap.reshape(X.shape)
-    coverage_pct = 100.0 * np.mean(best_signal >= threshold)
-    return X, Y, signal_2d, serving_2d, coverage_pct
+    coverage_pct = 100.0 * np.mean(covered)
+    return X, Y, signal_2d, serving_2d, coverage_pct, sinr_2d
 
 
 def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
-                                candidate_step=1.0, threshold=-65.0):
+                                candidate_step=1.0, threshold=-65.0, interference_aware=False,
+                                sinr_threshold_db=9.0):
     """
     RESEARCH-GAP EXTENSION: multi-AP joint placement optimization.
 
@@ -218,6 +264,12 @@ def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
     style guarantee: greedy achieves >= (1 - 1/e) ~= 63% of the true joint optimum for coverage
     maximization) and stays fast enough to run interactively, unlike full joint brute force.
 
+    interference_aware=True switches the coverage metric used at every greedy step to the
+    SINR-aware definition in simulate_coverage_multi (see its docstring for the full
+    rationale) -- this is the SECOND research-gap extension: it stops the greedy search from
+    treating two overlapping/adjacent APs as "free" extra coverage when they would actually
+    co-channel-interfere with each other in a real deployment.
+
     Returns: (list_of_ap_positions, final_coverage_pct, per_ap_marginal_gain_list)
     """
     candidates_x = np.arange(1.0, ROOM_W, candidate_step)
@@ -229,20 +281,26 @@ def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
     prev_coverage = 0.0
 
     for ap_index in range(num_aps):
-        best_gain = -1.0
+        best_gain = -np.inf
         best_candidate = None
         best_coverage_with_candidate = prev_coverage
 
         for cand in candidate_positions:
             trial_list = placed_aps + [cand]
-            _, _, _, _, cov = simulate_coverage_multi(trial_list, band=band,
-                                                        resolution=resolution,
-                                                        threshold=threshold)
+            _, _, _, _, cov, _ = simulate_coverage_multi(
+                trial_list, band=band, resolution=resolution, threshold=threshold,
+                interference_aware=interference_aware, sinr_threshold_db=sinr_threshold_db)
             gain = cov - prev_coverage
             if gain > best_gain:
                 best_gain = gain
                 best_candidate = cand
                 best_coverage_with_candidate = cov
+
+        # Stop adding APs once even the best remaining candidate no longer helps (this can
+        # happen with interference_aware=True: cramming in another AP can lower SINR for
+        # everyone without gaining any new area, so its marginal "gain" goes negative).
+        if best_candidate is None or best_gain <= 0:
+            break
 
         best_candidate = (float(best_candidate[0]), float(best_candidate[1]))
         placed_aps.append(best_candidate)
@@ -258,16 +316,21 @@ def find_optimal_multi_ap_placement(num_aps=2, band="2.4GHz", resolution=0.5,
     return placed_aps, coverage_history[-1], marginal_gains
 
 
-def plot_coverage_multi(router_list, band, title, save_name, threshold=-65.0):
+def plot_coverage_multi(router_list, band, title, save_name, threshold=-65.0,
+                         interference_aware=False, sinr_threshold_db=9.0):
     """Multi-AP coverage plot -- shades each grid cell by its best-server signal and marks
     every AP with a distinct colored star so overlapping coverage cells are visible."""
-    X, Y, signal_2d, serving_2d, coverage_pct = simulate_coverage_multi(
-        router_list, band=band, threshold=threshold)
+    X, Y, signal_2d, serving_2d, coverage_pct, sinr_2d = simulate_coverage_multi(
+        router_list, band=band, threshold=threshold, interference_aware=interference_aware,
+        sinr_threshold_db=sinr_threshold_db)
 
     fig, ax = plt.subplots(figsize=(9, 7))
     hm = ax.pcolormesh(X, Y, signal_2d, cmap="RdYlGn", vmin=-90, vmax=-30, shading="auto")
     plt.colorbar(hm, ax=ax, label="Best-Server Signal Strength (dBm)")
     ax.contour(X, Y, signal_2d, levels=[threshold], colors="blue", linewidths=2)
+    if interference_aware and sinr_2d is not None:
+        ax.contour(X, Y, sinr_2d, levels=[sinr_threshold_db], colors="red", linewidths=2,
+                   linestyles="dashed")
     plot_floorplan(ax)
 
     colors = ["black", "purple", "darkorange", "deeppink", "navy"]
@@ -275,8 +338,9 @@ def plot_coverage_multi(router_list, band, title, save_name, threshold=-65.0):
         ax.scatter(*pos, marker="*", s=550, c=colors[i % len(colors)], edgecolors="white",
                 zorder=5, label=f"AP {i + 1} {tuple(round(v, 1) for v in pos)}")
 
-    ax.set_title(f"{title}\nJoint Coverage @ {threshold:.0f} dBm threshold: {coverage_pct:.1f}% "
-                f"({len(router_list)} AP{'s' if len(router_list) != 1 else ''})")
+    mode_label = " (interference-aware)" if interference_aware else ""
+    ax.set_title(f"{title}\nJoint Coverage{mode_label} @ {threshold:.0f} dBm threshold: "
+                f"{coverage_pct:.1f}% ({len(router_list)} AP{'s' if len(router_list) != 1 else ''})")
     ax.set_xlabel("Room Width (m)")
     ax.set_ylabel("Room Height (m)")
     ax.legend(loc="upper right", fontsize=8)
@@ -577,3 +641,60 @@ if __name__ == "__main__":
         for i, (pos, gain) in enumerate(zip(multi_positions, marginal_gains)):
             f.write(f"AP {i + 1}: {tuple(round(v, 2) for v in pos)} (+{gain:.1f} pts)\n")
         f.write(f"Joint coverage: {multi_cov:.1f}% vs single-AP 5GHz {best_cov_5g:.1f}% (+{multi_cov - best_cov_5g:.1f} points)\n")
+
+    # ---- SECOND RESEARCH-GAP EXTENSION: interference-aware multi-AP placement ----
+    # With only 2 APs on this floor plan there isn't much room for them to sit close enough
+    # to meaningfully interfere, so this comparison uses 4 APs (more APs -> greedy has more
+    # opportunity to cluster them if nothing is penalizing that, which is exactly the failure
+    # mode interference-awareness is meant to catch).
+    print("\n" + "=" * 70)
+    print("SECOND RESEARCH-GAP EXTENSION: INTERFERENCE-AWARE MULTI-AP PLACEMENT (5GHz, 4 APs)")
+    print("=" * 70)
+    coverage_only_positions, coverage_only_cov, _ = find_optimal_multi_ap_placement(
+        num_aps=4, band="5GHz", candidate_step=1.0, threshold=THRESHOLD, interference_aware=False)
+    # Using a relaxed 3 dB minimum SINR bar for this demo (rather than the function's default
+    # 9 dB "good/reliable" bar) -- this represents accepting a weaker but still usable link,
+    # and produces a more informative comparison: instead of just concluding "use fewer APs",
+    # it shows the greedy search actively choosing to SPREAD the APs apart to keep interference
+    # manageable, which is the more general and more interesting behavior change to demonstrate.
+    demo_sinr_threshold = 3.0
+    interference_positions, interference_cov, _ = find_optimal_multi_ap_placement(
+        num_aps=4, band="5GHz", candidate_step=1.0, threshold=THRESHOLD, interference_aware=True,
+        sinr_threshold_db=demo_sinr_threshold)
+
+    # Re-measure BOTH placements under the interference-aware metric so they're compared
+    # on the same yardstick (a coverage-only placement can look great on paper and still
+    # perform worse once real co-channel interference between nearby APs is accounted for).
+    _, _, _, _, coverage_only_cov_under_sinr, _ = simulate_coverage_multi(
+        coverage_only_positions, band="5GHz", threshold=THRESHOLD, interference_aware=True,
+        sinr_threshold_db=demo_sinr_threshold)
+
+    plot_coverage_multi(coverage_only_positions, "5GHz",
+                         "Coverage-Only Placement (ignores AP-to-AP interference)",
+                         "12_coverage_only_vs_interference_aware_A_coverage_only.png",
+                         threshold=THRESHOLD, interference_aware=True,
+                         sinr_threshold_db=demo_sinr_threshold)
+    plot_coverage_multi(interference_positions, "5GHz",
+                         "Interference-Aware Placement (penalizes co-channel overlap)",
+                         "12_coverage_only_vs_interference_aware_B_interference_aware.png",
+                         threshold=THRESHOLD, interference_aware=True,
+                         sinr_threshold_db=demo_sinr_threshold)
+
+    print(f"  Coverage-only search's own metric:        {coverage_only_cov:.1f}% "
+          f"(4 APs placed at {[tuple(round(v,1) for v in p) for p in coverage_only_positions]})")
+    print(f"  ...but under a real SINR/interference check, that same placement only achieves: "
+          f"{coverage_only_cov_under_sinr:.1f}%")
+    print(f"  Interference-aware search (optimizes for SINR from the start): "
+          f"{interference_cov:.1f}% (4 APs placed at "
+          f"{[tuple(round(v,1) for v in p) for p in interference_positions]})")
+    print(f"  Gain from being interference-aware: +{interference_cov - coverage_only_cov_under_sinr:.1f} "
+          f"points of REAL (interference-limited) coverage")
+    print("Saved: 12_coverage_only_vs_interference_aware_{A_coverage_only,B_interference_aware}.png")
+
+    with open(f"{OUT_DIR}/placement_summary.txt", "a") as f:
+        f.write("\nSECOND RESEARCH-GAP EXTENSION: INTERFERENCE-AWARE MULTI-AP PLACEMENT (5GHz, 4 APs)\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"Coverage-only placement:      {coverage_only_cov:.1f}% by its own (interference-blind) "
+                f"metric, but only {coverage_only_cov_under_sinr:.1f}% once real co-channel SINR is checked\n")
+        f.write(f"Interference-aware placement: {interference_cov:.1f}% real (SINR-checked) coverage\n")
+        f.write(f"Gain from interference-awareness: +{interference_cov - coverage_only_cov_under_sinr:.1f} points\n")

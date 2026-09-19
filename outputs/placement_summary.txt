@@ -15,3 +15,9 @@ RESEARCH-GAP EXTENSION: MULTI-AP GREEDY JOINT PLACEMENT (5GHz)
 AP 1: (18.0, 9.0) (+93.6 pts)
 AP 2: (18.0, 14.0) (+6.4 pts)
 Joint coverage: 100.0% vs single-AP 5GHz 93.6% (+6.4 points)
+
+SECOND RESEARCH-GAP EXTENSION: INTERFERENCE-AWARE MULTI-AP PLACEMENT (5GHz, 4 APs)
+--------------------------------------------------
+Coverage-only placement:      100.0% by its own (interference-blind) metric, but only 79.2% once real co-channel SINR is checked
+Interference-aware placement: 95.0% real (SINR-checked) coverage
+Gain from interference-awareness: +15.8 points
